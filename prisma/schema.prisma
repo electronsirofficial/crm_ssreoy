@@ -1,0 +1,406 @@
+// Coaching institute CRM — evidence-backed lead attribution.
+// Database: Neon PostgreSQL. DATABASE_URL = pooled connection, DIRECT_URL = direct (used by migrations).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  ADMIN
+  AGENT
+  RECEPTION
+}
+
+enum LeadSource {
+  OUTBOUND_CALL
+  FIELD_VISIT
+  WALK_IN
+  REFERRAL
+  OTHER
+}
+
+enum Exam {
+  JEE
+  NEET
+  FOUNDATION
+  OTHER
+  UNKNOWN
+}
+
+enum ProcessingStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+  SKIPPED
+}
+
+enum VisitStatus {
+  IN_PROGRESS
+  COMPLETED
+  ABANDONED
+}
+
+enum FollowUpStatus {
+  PENDING
+  DONE
+  CANCELLED
+}
+
+enum FollowUpType {
+  CALL
+  HOME_VISIT
+  INSTITUTE_VISIT
+  OTHER
+}
+
+enum FlagSeverity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum FlagStatus {
+  OPEN
+  DISMISSED
+  CONFIRMED
+}
+
+enum CommissionStatus {
+  NOT_ELIGIBLE // walk-in / no qualifying evidence
+  PENDING_REVIEW // engine found an eligible agent; awaiting admin approval
+  DISPUTED // conflicting claims or ambiguous evidence
+  APPROVED
+  REJECTED
+  PAID
+}
+
+enum QuestionType {
+  SINGLE
+  MULTI
+  DROPDOWN
+  TEXT
+  NUMBER
+  DATE
+  BOOLEAN
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  phone        String?
+  passwordHash String
+  role         Role     @default(AGENT)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  leadsCreated  Lead[]          @relation("LeadCreatedBy")
+  leadsAssigned Lead[]          @relation("LeadAssignedTo")
+  calls         Call[]
+  visits        FieldVisit[]
+  followUps     FollowUp[]
+  activities    Activity[]
+  flags         FraudFlag[]     @relation("FlagAgent")
+  commissions   Commission[]    @relation("CommissionAgent")
+  claims        LeadClaim[]
+  decisions     Commission[]    @relation("CommissionDecidedBy")
+  reviewedFlags FraudFlag[]     @relation("FlagReviewer")
+  enrollments   Enrollment[]
+}
+
+model LeadStage {
+  key       String  @id
+  label     String
+  order     Int
+  color     String  @default("slate")
+  isTerminal Boolean @default(false)
+  active    Boolean @default(true)
+}
+
+model Lead {
+  id            String     @id @default(cuid())
+  studentName   String
+  parentName    String?
+  phone         String // normalized 10-digit
+  altPhone      String?
+  email         String?
+  address       String?
+  locality      String?
+  classLevel    String?
+  targetExam    Exam       @default(UNKNOWN)
+  school        String?
+  stageKey      String     @default("NEW")
+  source        LeadSource
+  // Reference location (set by first verified visit or manually) used to validate later visits.
+  homeLat       Float?
+  homeLng       Float?
+
+  createdById   String?
+  createdBy     User?      @relation("LeadCreatedBy", fields: [createdById], references: [id])
+  assignedToId  String?
+  assignedTo    User?      @relation("LeadAssignedTo", fields: [assignedToId], references: [id])
+
+  // Set by reception when the family appears at the institute.
+  walkInAt      DateTime?
+  walkInDeclaredAgentId String? // agent the family says brought them (if any), unverified
+  walkInNotes   String?
+
+  nextFollowUpAt DateTime?
+  aiPriority     Int?       // 0-100
+  aiConversion   Int?       // 0-100 likelihood
+  aiNextAction   String?
+  aiUpdatedAt    DateTime?
+  lostReason     String?
+  notes          String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  calls       Call[]
+  visits      FieldVisit[]
+  followUps   FollowUp[]
+  activities  Activity[]
+  claims      LeadClaim[]
+  flags       FraudFlag[]
+  enrollment  Enrollment?
+  commissions Commission[]
+
+  @@index([phone])
+  @@index([assignedToId])
+  @@index([stageKey])
+}
+
+// Every time an agent asserts involvement with a lead (creating it, or trying to create a duplicate).
+model LeadClaim {
+  id        String   @id @default(cuid())
+  leadId    String
+  lead      Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  agentId   String
+  agent     User     @relation(fields: [agentId], references: [id])
+  kind      String   // CREATED | DUPLICATE_ATTEMPT | MANUAL
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@index([leadId])
+}
+
+model Call {
+  id             String           @id @default(cuid())
+  leadId         String
+  lead           Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  agentId        String
+  agent          User             @relation(fields: [agentId], references: [id])
+  phoneNumber    String
+  calledAt       DateTime
+  durationSec    Int?
+  recordingPath  String?
+  recordingHash  String?
+  recordingMime  String?
+  consentConfirmed Boolean        @default(false)
+
+  // What the agent says happened (compared against the transcript by AI).
+  reportedOutcome String?
+  reportedInterest String?
+  reportedNotes   String?
+
+  transcript       String?
+  transcriptStatus ProcessingStatus @default(PENDING)
+  transcriptError  String?
+  summary          String?
+  qualityScore     Int?   // 0-100
+  conversionScore  Int?   // 0-100
+  evaluation       Json?  // per-criterion scores
+  discrepancies    Json?  // [{claim, evidence, severity}]
+  aiInsights       Json?  // interest, objections, nextAction, invitedToVisit, meaningful
+  analysisStatus   ProcessingStatus @default(PENDING)
+  analysisError    String?
+  analyzedAt       DateTime?
+  createdAt        DateTime @default(now())
+
+  @@index([leadId])
+  @@index([agentId, calledAt])
+}
+
+model EvaluationCriterion {
+  id          String  @id @default(cuid())
+  key         String  @unique
+  label       String
+  description String
+  weight      Int     @default(10)
+  order       Int     @default(0)
+  active      Boolean @default(true)
+}
+
+model FieldVisit {
+  id            String      @id @default(cuid())
+  leadId        String
+  lead          Lead        @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  agentId       String
+  agent         User        @relation(fields: [agentId], references: [id])
+  status        VisitStatus @default(IN_PROGRESS)
+
+  // Check-in — timestamps are SERVER time; client time stored only for skew detection.
+  checkInAt        DateTime
+  checkInClientAt  DateTime?
+  checkInLat       Float
+  checkInLng       Float
+  checkInAccuracy  Float?
+  photoPath        String
+  photoHash        String   // sha256 of bytes
+  photoDHash       String?  // perceptual hash for near-duplicate detection
+  photoWidth       Int?
+  photoHeight      Int?
+
+  checkOutAt       DateTime?
+  checkOutClientAt DateTime?
+  checkOutLat      Float?
+  checkOutLng      Float?
+  checkOutAccuracy Float?
+  checkOutPhotoPath String?
+
+  durationMin       Int?
+  distanceFromHomeM Int?   // distance from lead's reference location
+  checkInOutDriftM  Int?   // distance between check-in and check-out points
+  userAgent         String?
+  ipAddress         String?
+
+  verificationScore Int?   // 0-100 computed from evidence checks
+  verificationNotes Json?  // [{check, passed, detail}]
+
+  questionnaire QuestionnaireResponse?
+  createdAt     DateTime @default(now())
+
+  @@index([leadId])
+  @@index([agentId, checkInAt])
+  @@index([photoHash])
+}
+
+model QuestionnaireQuestion {
+  id        String       @id @default(cuid())
+  key       String       @unique
+  text      String
+  type      QuestionType
+  options   Json?        // string[]
+  required  Boolean      @default(true)
+  order     Int          @default(0)
+  active    Boolean      @default(true)
+  // Used by verification/attribution: e.g. INTEREST, DECISION_MAKER, MET_WITH.
+  semantic  String?
+}
+
+model QuestionnaireResponse {
+  id           String     @id @default(cuid())
+  visitId      String     @unique
+  visit        FieldVisit @relation(fields: [visitId], references: [id], onDelete: Cascade)
+  answers      Json       // { [questionKey]: value }
+  startedAt    DateTime
+  submittedAt  DateTime   @default(now())
+  fillSeconds  Int
+  completeness Int        // % of required questions answered
+}
+
+model FollowUp {
+  id          String         @id @default(cuid())
+  leadId      String
+  lead        Lead           @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  agentId     String
+  agent       User           @relation(fields: [agentId], references: [id])
+  dueAt       DateTime
+  type        FollowUpType   @default(CALL)
+  notes       String?
+  status      FollowUpStatus @default(PENDING)
+  completedAt DateTime?
+  outcome     String?
+  createdAt   DateTime       @default(now())
+
+  @@index([agentId, status, dueAt])
+}
+
+model Enrollment {
+  id           String   @id @default(cuid())
+  leadId       String   @unique
+  lead         Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  enrolledAt   DateTime @default(now())
+  course       String
+  feeAmount    Int?
+  recordedById String
+  recordedBy   User     @relation(fields: [recordedById], references: [id])
+}
+
+model Commission {
+  id              String           @id @default(cuid())
+  leadId          String
+  lead            Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  agentId         String?
+  agent           User?            @relation("CommissionAgent", fields: [agentId], references: [id])
+  status          CommissionStatus
+  attribution     String           // AGENT_CALL | AGENT_VISIT | AGENT_CALL_AND_VISIT | WALK_IN | CONTESTED | NO_EVIDENCE
+  amount          Int              @default(0)
+  confidence      Int              @default(0) // 0-100
+  reasoning       Json             // [string] human-readable explanation of the decision
+  evidence        Json             // snapshot of qualifying/non-qualifying touchpoints
+  contenders      Json?            // [{agentId, name, score, firstEvidenceAt}]
+  decidedById     String?
+  decidedBy       User?            @relation("CommissionDecidedBy", fields: [decidedById], references: [id])
+  decidedAt       DateTime?
+  decisionNote    String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([status])
+  @@index([agentId])
+}
+
+model FraudFlag {
+  id           String       @id @default(cuid())
+  type         String       // SHORT_VISIT | PHOTO_REUSE | GPS_* | DUPLICATE_CLAIM | CALL_DISCREPANCY | ...
+  severity     FlagSeverity
+  status       FlagStatus   @default(OPEN)
+  message      String
+  details      Json?
+  agentId      String?
+  agent        User?        @relation("FlagAgent", fields: [agentId], references: [id])
+  leadId       String?
+  lead         Lead?        @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  callId       String?
+  visitId      String?
+  reviewedById String?
+  reviewedBy   User?        @relation("FlagReviewer", fields: [reviewedById], references: [id])
+  reviewedAt   DateTime?
+  reviewNote   String?
+  dedupeKey    String?      @unique
+  createdAt    DateTime     @default(now())
+
+  @@index([status, severity])
+  @@index([agentId])
+}
+
+// Append-only, hash-chained audit log. Each row's hash covers its content and the previous hash,
+// so any later edit or deletion breaks the chain and is detectable (see /admin/audit).
+model Activity {
+  id        String   @id @default(cuid())
+  seq       Int      @unique @default(autoincrement())
+  leadId    String?
+  lead      Lead?    @relation(fields: [leadId], references: [id], onDelete: Restrict) // leads with history can't be deleted
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id])
+  type      String
+  message   String
+  data      Json?
+  prevHash  String
+  hash      String
+  createdAt DateTime @default(now())
+
+  @@index([leadId, createdAt])
+}
+
+model Setting {
+  key   String @id
+  value Json
+}
