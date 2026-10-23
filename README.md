@@ -5,7 +5,7 @@ Commission is decided from evidence (recorded calls, GPS-verified visits, questi
 
 ## Setup
 
-1. **Database (Neon):** create a project at neon.tech → *Connect* → copy the **pooled** and **direct** connection strings into `.env` as `DATABASE_URL` and `DIRECT_URL`.
+1. **Database:** put your Postgres connection string in `.env` as `DATABASE_URL` (Prisma Postgres: the `postgres://…@db.prisma.io:5432/…` URL; Neon: the pooled URL). On Vercel, the same variable must be set in Project → Settings → Environment Variables; `npm run build` runs `prisma migrate deploy`, so tables are created/updated on each deploy.
 2. **AI keys (optional but recommended):** in `.env`
    - `ANTHROPIC_API_KEY` — Claude analyses call transcripts, scores calls, gives lead/agent insights.
    - `TRANSCRIPTION_PROVIDER=deepgram` + `DEEPGRAM_API_KEY` (handles Hindi/English mixing), or `openai` + `OPENAI_API_KEY`.
@@ -13,7 +13,7 @@ Commission is decided from evidence (recorded calls, GPS-verified visits, questi
 3. Install and create tables:
    ```bash
    npm install
-   npx prisma migrate dev --name init   # creates tables in Neon
+   npx prisma migrate deploy            # creates tables
    npm run db:seed                       # config + demo data (SEED_DEMO=false for config only)
    npm run dev                           # http://localhost:3000
    ```
